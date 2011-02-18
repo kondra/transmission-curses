@@ -52,17 +52,23 @@ HeaderInfo *header_parser(char *header)
 
     needle = "HTTP/1.1";
     p = strstr(header, needle);
+    assert(p != NULL);
     p += strlen(needle);
     sscanf(p, "%d", &info->status_code);
     info->status_str = get_str(p, ' ', '\r');
 
     needle = "X-Transmission-Session-Id:";
     p = strstr(header, needle);
-    p += strlen(needle);
-    info->session_id = get_str(p, ' ', '\r');
+    if (p != NULL) {
+        p += strlen(needle);
+        info->session_id = get_str(p, ' ', '\r');
+    } else {
+        info->session_id = NULL;
+    }
 
     needle = "Content-Length: ";
     p = strstr(header, needle);
+    assert(p != NULL);
     p += strlen(needle);
     sscanf(p, "%d", &info->length);
 /*
@@ -207,7 +213,7 @@ char *get_response(int sockfd, HeaderInfo **info)
         if (!flag) {
             *info = header_parser(buf);
             flag = 1;
-            fprintf(stderr, "%s\n", (*info)->status_str);
+//            fprintf(stderr, "%s\n", (*info)->status_str);
             if ((*info)->status_code == HTTP_CONFLICT)
                 return NULL;
         }
@@ -253,7 +259,7 @@ int main()
     char *header, *response;
     HeaderInfo *info;
 
-    const char *json_query = "{\"arguments\": {\"fields\":[\"id\",\"name\",\"totalSize\"],\"ids\":[7,10]},\"method\":\"torrent-get\",\"tag\":39693}";
+    const char *json_query = "{\"arguments\": {\"fields\":[\"id\",\"name\",\"totalSize\"]},\"method\":\"torrent-get\",\"tag\":39693}";
 
     SESSION_ID = (char *) calloc(100, sizeof(char));
     strcpy(SESSION_ID, "wXUvnYNRy5RGx0f5lo8017dtnUIyMBja1dMhoNJ9XVuTTqNs");
@@ -267,6 +273,7 @@ int main()
             strcpy(SESSION_ID, info->session_id);
             header_destroy(info);
             free(response);
+            continue;
         }
         if (info->status_code == HTTP_OK) {
             header_destroy(info);
@@ -274,10 +281,11 @@ int main()
         }
     }
     remote_disconnect(sockfd);
-    printf("\n");
 
     char *json_data = get_json_data(response);
     free(response);
+
+    printf("\n");
     puts(json_data);
 
     return 0;
