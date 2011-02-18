@@ -9,14 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DEBUG
-
-#ifdef DEBUG
-#define debug(...) do { fprintf(stderr, "DEBUG: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } while (0)
-#else
-#define debug(...)
-#endif
-
 const char HOST[] = "hitagi";
 const char PAGE[] = "transmission/rpc";
 const unsigned short PORT = 9091;
