@@ -5,29 +5,90 @@
 #include <unistd.h>
 
 #include <stdio.h>
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
-const char HOST[] = "hitagi";
-const char SESSION_ID[] = "wXUvnYNRy5RGx0f5lo8017dtnUIyMBja1dMhoNJ9XVuTTqNs";
-const unsigned short PORT = 9091;
-const int MAXSLEEP = 128;
+#define DEBUG
 
-int connect_retry(int sockfd, const struct sockaddr *addr, socklen_t alen)
+#ifdef DEBUG
+#define debug(...) do { fprintf(stderr, "DEBUG: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); fflush(stderr); } while (0)
+#else
+#define debug(...)
+#endif
+
+const char HOST[] = "hitagi";
+const char PAGE[] = "transmission/rpc";
+const unsigned short PORT = 9091;
+
+char *SESSION_ID;
+
+enum {
+    HTTP_CONFLICT = 409,
+    HTTP_OK = 200,
+};
+
+typedef struct {
+    int status_code;
+    char *status_str;
+    int length;
+    char *session_id;
+} HeaderInfo;
+
+static char *get_str(char *p, char b, char e)
 {
-    int nsec;
-    for (nsec = 1; nsec <= MAXSLEEP; nsec <<= 1) {
-        if (connect(sockfd, addr, alen) == 0) {
-            printf("connected\n");
-            return 0;
-        }
-        if (nsec <= MAXSLEEP / 2)
-            sleep(nsec);
-    }
-    return -1;
+    char *pe, *str;
+    while (*p != b) 
+        p++;
+    pe = ++p;
+    while (*pe != e) 
+        pe++;
+    *pe = '\0';
+    str = (char *) calloc(strlen(p) + 1, sizeof(char));
+    strcpy(str, p);
+    *pe = e;
+    return str;
 }
 
-int create_tcp_socket()
+HeaderInfo *header_parser(char *header)
+{
+    char *p, *needle;
+    HeaderInfo *info;
+
+    info = (HeaderInfo *) calloc(1, sizeof(*info));
+    assert(info != 0);
+
+    needle = "HTTP/1.1";
+    p = strstr(header, needle);
+    p += strlen(needle);
+    sscanf(p, "%d", &info->status_code);
+    info->status_str = get_str(p, ' ', '\r');
+
+    needle = "X-Transmission-Session-Id:";
+    p = strstr(header, needle);
+    p += strlen(needle);
+    info->session_id = get_str(p, ' ', '\r');
+
+    needle = "Content-Length: ";
+    p = strstr(header, needle);
+    p += strlen(needle);
+    sscanf(p, "%d", &info->length);
+/*
+    printf("status code: %d\n", info->status_code);
+    printf("status str: %s\n", info->status_str);
+    printf("length: %d\n", info->length);
+    printf("session id: %s\n", info->session_id);
+*/
+    return info;
+}
+
+void header_destroy(HeaderInfo *info)
+{
+    free(info->session_id);
+    free(info->status_str);
+}
+
+static int create_tcp_socket()
 {
     int sockfd;
     if ((sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) {
@@ -37,11 +98,12 @@ int create_tcp_socket()
     return sockfd;
 }
 
-char *get_ip(const char *host)
+static char *get_ip(const char *host)
 {
     struct hostent *hent;
     int ip_len = 15;
-    char *ip = (char *) malloc(sizeof(char) * (ip_len + 1));
+    char *ip = (char *) calloc(ip_len + 1, sizeof(char));
+    assert(ip != NULL);
     memset(ip, 0, ip_len + 1);
     if ((hent = gethostbyname(host)) == NULL) {
         herror("failed to get ip");
@@ -54,51 +116,19 @@ char *get_ip(const char *host)
     return ip;
 }
 
-char *build_get_query(const char *host, const char *page)
-{
-    char *query;
-    char *getpage;
-    char *tpl = "GET /%s HTTP/1.1\r\nHost: %s\r\n\r\n"; //X-Transmission-Session-Id: %s\r\n\r\n";
-    getpage = (char *) malloc(sizeof(char) * (strlen(page) + 1));
-    strcpy(getpage, page);
-    if (getpage[0] == '/')
-        getpage++;
-    query = (char *) malloc(strlen(host) + strlen(getpage) /*+ strlen(SESSION_ID)*/ + strlen(tpl) - 5);
-    sprintf(query, tpl, getpage, host/*, SESSION_ID*/);
-    return query;
-}
-
-char *build_post_query(const char *host, const char *page)
-{
-    char *query;
-    char *postpage;
-    char *tpl = "POST /%s HTTP/1.1\r\nHost: %s\r\nX-Transmission-Session-Id: %s\r\nContent-Length: %d\r\nContent-Type: application/json\r\n\r\n%s";
-    char *json = "{\"arguments\": {\"fields\":[\"id\",\"name\",\"totalSize\"],\"ids\":[7,10]},\"method\":\"torrent-get\",\"tag\":39693}";
-//    char *json = "{\"method\": \"torrent-get\"}";
-    postpage = (char *) malloc(sizeof(char) * (strlen(page) + 1));
-    strcpy(postpage, page);
-    if (postpage[0] == '/')
-        postpage++;
-    query = (char *) malloc(strlen(host) + strlen(postpage) + strlen(SESSION_ID) + strlen(tpl) + 1000);
-    sprintf(query, tpl, postpage, host, SESSION_ID, strlen(json), json);
-    return query;
-}
-
-int main()
+int remote_connect(const char *host, const int port)
 {
     struct sockaddr_in *remote;
     int sockfd, tmpres;
-    char *ip, *get, *host, *page;
-    char buf[BUFSIZ + 1];
-
-    host = (char *) malloc(sizeof(char) * (strlen(HOST) + 1));
-    strcpy(host, HOST);
-    page = "/transmission/rpc";
+    char *ip;
 
     sockfd = create_tcp_socket();
     ip = get_ip(host);
     fprintf(stderr, "connect to %s\n", ip);
-    remote = (struct sockaddr_in *) malloc(sizeof(*remote));
+
+    remote = (struct sockaddr_in *) calloc(1, sizeof(*remote));
+    assert(remote != NULL);
+
     remote->sin_family = AF_INET;
     tmpres = inet_pton(AF_INET, ip, &(remote->sin_addr.s_addr));
     if (tmpres < 0) {
@@ -108,44 +138,155 @@ int main()
         fprintf(stderr, "%s is not a valid ip address\n", ip);
         exit(EXIT_FAILURE);
     }
+
     remote->sin_port = htons(PORT);
     if (connect(sockfd, (struct sockaddr *)remote, sizeof(*remote)) < 0) {
         perror("failed to connect");
         exit(EXIT_FAILURE);
     }
-    get = build_post_query(host, page);
-    fprintf(stderr, "\n%s\n\n", get);
 
+    free(ip);
+
+    return sockfd;
+}
+
+void remote_disconnect(int sockfd)
+{
+    close(sockfd);
+}
+
+char *build_header(const char *host, const char *page, const int len)
+{
+    char *header;
+    char buf[32]; //for int
+    const char *header_format = "POST /%s HTTP/1.1\r\nHost: %s\r\nX-Transmission-Session-Id: %s\r\nContent-Length: %s\r\nContent-Type: application/json\r\n\r\n";
+
+    if (page[0] == '/') {
+        fprintf(stderr, "leading \"/\" in page argument\n");
+        exit(EXIT_FAILURE);
+    }
+
+    sprintf(buf, "%d", len);
+    header = (char *) calloc(strlen(host) + strlen(page) + strlen(SESSION_ID) + strlen(header_format) - 8 + strlen(buf), sizeof(char));
+    assert(header != NULL);
+    sprintf(header, header_format, page, host, SESSION_ID, buf);
+
+    return header;
+}
+
+void send_query(int sockfd, const char *header, const char *json_query)
+{
+    char *data;
     int sent = 0;
-    while (sent < strlen(get)) {
-        tmpres = send(sockfd, get + sent, strlen(get) - sent, 0);
-        if (tmpres == -1) {
+    int tmpres, len;
+
+    data = (char *) calloc(strlen(header) + strlen(json_query), sizeof(char));
+    assert(data != NULL);
+    strcpy(data, header);
+    strcat(data, json_query);
+    len = strlen(data);
+
+    while (sent < len) {
+        tmpres = send(sockfd, data + sent, len - sent, 0);
+        if (tmpres < 0) {
             perror("failed to send query");
             exit(EXIT_FAILURE);
         }
         sent += tmpres;
     }
 
-    memset(buf, 0, sizeof(buf));
-    char *htmlcontent;
+    free(data);
+}
+
+char *get_response(int sockfd, HeaderInfo **info)
+{
+    char buf[BUFSIZ + 1];
+    char *response;
+    int tmpres;
+    int size = BUFSIZ + 1;
+    int cpos = 0;
+    int flag = 0;
+//    HeaderInfo *info;
+
+    response = (char *) calloc(BUFSIZ + 1, sizeof(char));
+    assert(response != NULL);
+
     while ((tmpres = recv(sockfd, buf, BUFSIZ, 0)) > 0) {
-        htmlcontent = strstr(buf, "\r\n\r\n");
-        printf("%s", buf);
-        if (htmlcontent != NULL)
+        if (!flag) {
+            *info = header_parser(buf);
+            flag = 1;
+            fprintf(stderr, "%s\n", (*info)->status_str);
+            if ((*info)->status_code == HTTP_CONFLICT)
+                return NULL;
+        }
+        if (size - cpos > tmpres) {
+            strncpy(response + cpos, buf, tmpres);
+        } else {
+            response = (char *) realloc(response, (size = cpos + tmpres));
+            assert(response != NULL);
+            strncpy(response + cpos, buf, tmpres);
+        }
+        cpos += tmpres;
+        if (cpos >= (*info)->length)
             break;
-        memset(buf, 0, sizeof(buf));
     }
-    printf("\n");
 
     if (tmpres < 0) {
         perror("error receiving data");
+        exit(EXIT_FAILURE);
     }
 
-    free(get);
-    free(remote);
-    free(ip);
+    return response;
+}
 
-    close(sockfd);
+static char *get_json_data(char *response)
+{
+    char *p, *pe, *data;
+    char *needle = "\r\n\r\n";
+    p = strstr(response, needle);
+    p += strlen(needle);
+
+    pe = strstr(response, needle);
+    *pe = '\0';
+
+    data = (char *) calloc(strlen(p), sizeof(char));
+    strcpy(data, p);
+
+    return data;
+}
+
+int main()
+{
+    int sockfd;
+    char *header, *response;
+    HeaderInfo *info;
+
+    const char *json_query = "{\"arguments\": {\"fields\":[\"id\",\"name\",\"totalSize\"],\"ids\":[7,10]},\"method\":\"torrent-get\",\"tag\":39693}";
+
+    SESSION_ID = (char *) calloc(100, sizeof(char));
+    strcpy(SESSION_ID, "wXUvnYNRy5RGx0f5lo8017dtnUIyMBja1dMhoNJ9XVuTTqNs");
+
+    sockfd = remote_connect(HOST, PORT);
+    while (1) {
+        header = build_header(HOST, PAGE, strlen(json_query));
+        send_query(sockfd, header, json_query);
+        response = get_response(sockfd, &info);
+        if (info->status_code == HTTP_CONFLICT) {
+            strcpy(SESSION_ID, info->session_id);
+            header_destroy(info);
+            free(response);
+        }
+        if (info->status_code == HTTP_OK) {
+            header_destroy(info);
+            break;
+        }
+    }
+    remote_disconnect(sockfd);
+    printf("\n");
+
+    char *json_data = get_json_data(response);
+    free(response);
+    puts(json_data);
 
     return 0;
 }
