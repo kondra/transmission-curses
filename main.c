@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#include "remote.c"
+#include "remote.h"
 
 int main()
 {
